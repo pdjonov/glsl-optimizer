@@ -282,6 +282,75 @@ void ir_print_glsl_visitor::visit(ir_variable *ir)
    buffer = print_type_post(buffer, ir->type, false);
 }
 
+template<bool is_initialization>
+void print_assignement(ir_assignment *ir, ir_print_glsl_visitor* visitor)
+{
+	// assignement in global scope are postponed to main function
+	if (visitor->mode != kPrintGlslNone)
+	{
+		assert (!visitor->globals->main_function_done);
+        assert (!is_initialization);
+		visitor->globals->global_assignements.push_tail (new(visitor->globals->mem_ctx) ga_entry(ir));
+		ralloc_asprintf_append(&visitor->buffer, "//"); // for the ; that will follow (ugly, I know)
+		return;
+	}
+
+   if (ir->condition)
+   {
+      assert(!is_initialization);
+      ir->condition->accept(visitor);
+	  ralloc_asprintf_append (&visitor->buffer, " ");
+   }
+
+   if (is_initialization)
+       ir->whole_variable_written()->accept(visitor);
+   else
+       ir->lhs->accept(visitor);
+
+   char mask[5];
+   unsigned j = 0;
+   const glsl_type* lhsType = ir->lhs->type;
+   const glsl_type* rhsType = ir->rhs->type;
+   if (ir->lhs->type->vector_elements > 1 && ir->write_mask != (1<<ir->lhs->type->vector_elements)-1)
+   {
+	   for (unsigned i = 0; i < 4; i++) {
+		   if ((ir->write_mask & (1 << i)) != 0) {
+			   mask[j] = "xyzw"[i];
+			   j++;
+		   }
+	   }
+	   lhsType = glsl_type::get_instance(lhsType->base_type, j, 1);
+   }
+   mask[j] = '\0';
+   bool hasWriteMask = false;
+   if (mask[0])
+   {
+       assert(!is_initialization);
+	   ralloc_asprintf_append (&visitor->buffer, ".%s", mask);
+	   hasWriteMask = true;
+   }
+
+   ralloc_asprintf_append (&visitor->buffer, " = ");
+
+   bool typeMismatch = (lhsType != rhsType);
+   const bool addSwizzle = hasWriteMask && typeMismatch;
+   if (typeMismatch)
+   {
+	   if (!addSwizzle)
+		visitor->buffer = print_type(visitor->buffer, lhsType, true);
+	   ralloc_asprintf_append (&visitor->buffer, "(");
+   }
+
+   ir->rhs->accept(visitor);
+
+   if (typeMismatch)
+   {
+	   ralloc_asprintf_append (&visitor->buffer, ")");
+	   if (addSwizzle)
+		   ralloc_asprintf_append (&visitor->buffer, ".%s", mask);
+   }
+
+}
 
 void ir_print_glsl_visitor::visit(ir_function_signature *ir)
 {
@@ -339,7 +408,17 @@ void ir_print_glsl_visitor::visit(ir_function_signature *ir)
       ir_instruction *const inst = (ir_instruction *) iter.get();
 
       indent();
-      inst->accept(this);
+
+      ir_instruction *const next = (ir_instruction*)(inst->next);
+      if (inst->ir_type == ir_type_variable and next and next->ir_type == ir_type_assignment and
+          next->as_assignment()->condition == NULL and
+          inst->as_variable() == next->as_assignment()->whole_variable_written())
+      {
+          print_assignement<true>(next->as_assignment(), this);
+          iter.next();
+      }
+      else
+          inst->accept(this);
 	  ralloc_asprintf_append (&buffer, ";\n");
    }
    indentation--;
@@ -601,65 +680,7 @@ void ir_print_glsl_visitor::visit(ir_dereference_record *ir)
 
 void ir_print_glsl_visitor::visit(ir_assignment *ir)
 {
-	// assignement in global scope are postponed to main function
-	if (this->mode != kPrintGlslNone)
-	{
-		assert (!this->globals->main_function_done);
-		this->globals->global_assignements.push_tail (new(this->globals->mem_ctx) ga_entry(ir));
-		ralloc_asprintf_append(&buffer, "//"); // for the ; that will follow (ugly, I know)
-		return;
-	}
-	
-   if (ir->condition)
-   {
-      ir->condition->accept(this);
-	  ralloc_asprintf_append (&buffer, " ");
-   }
-
-   ir->lhs->accept(this);
-
-   char mask[5];
-   unsigned j = 0;
-   const glsl_type* lhsType = ir->lhs->type;
-   const glsl_type* rhsType = ir->rhs->type;
-   if (ir->lhs->type->vector_elements > 1 && ir->write_mask != (1<<ir->lhs->type->vector_elements)-1)
-   {
-	   for (unsigned i = 0; i < 4; i++) {
-		   if ((ir->write_mask & (1 << i)) != 0) {
-			   mask[j] = "xyzw"[i];
-			   j++;
-		   }
-	   }
-	   lhsType = glsl_type::get_instance(lhsType->base_type, j, 1);
-   }
-   mask[j] = '\0';
-   bool hasWriteMask = false;
-   if (mask[0])
-   {
-	   ralloc_asprintf_append (&buffer, ".%s", mask);
-	   hasWriteMask = true;
-   }
-
-   ralloc_asprintf_append (&buffer, " = ");
-
-   bool typeMismatch = (lhsType != rhsType);
-   const bool addSwizzle = hasWriteMask && typeMismatch;
-   if (typeMismatch)
-   {
-	   if (!addSwizzle)
-		buffer = print_type(buffer, lhsType, true);
-	   ralloc_asprintf_append (&buffer, "(");
-   }
-
-   ir->rhs->accept(this);
-
-   if (typeMismatch)
-   {
-	   ralloc_asprintf_append (&buffer, ")");
-	   if (addSwizzle)
-		   ralloc_asprintf_append (&buffer, ".%s", mask);
-   }
-
+    print_assignement<false>(ir, this);
 }
 
 static char* print_float (char* buffer, float f)
