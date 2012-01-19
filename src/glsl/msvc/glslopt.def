@@ -1,0 +1,11 @@
+LIBRARY
+
+EXPORTS
+	glslopt_initialize
+	glslopt_cleanup
+	glslopt_optimize
+	glslopt_get_status
+	glslopt_get_output
+	glslopt_get_raw_output
+	glslopt_get_log
+	glslopt_shader_delete
