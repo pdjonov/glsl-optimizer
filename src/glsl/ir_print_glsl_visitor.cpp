@@ -58,18 +58,18 @@ struct ga_entry : public exec_node
 struct global_print_tracker {
 	global_print_tracker () {
 		mem_ctx = ralloc_context(0);
-		temp_var_counter = 0;
-		temp_var_hash = hash_table_ctor(0, hash_table_pointer_hash, hash_table_pointer_compare);
+		var_counter = 0;
+		var_hash = hash_table_ctor(0, hash_table_pointer_hash, hash_table_pointer_compare);
 		main_function_done = false;
 	}
 	
 	~global_print_tracker() {
-		hash_table_dtor (temp_var_hash);
+		hash_table_dtor (var_hash);
 		ralloc_free(mem_ctx);
 	}
 	
-	unsigned	temp_var_counter;
-	hash_table*	temp_var_hash;
+	unsigned	var_counter;
+	hash_table*	var_hash;
 	exec_list	global_assignements;
 	void* mem_ctx;
 	bool	main_function_done;
@@ -188,16 +188,19 @@ void ir_print_glsl_visitor::indent(void)
 
 void ir_print_glsl_visitor::print_var_name (ir_variable* v)
 {
-	if (v->mode == ir_var_temporary)
+    long id = (long)hash_table_find (globals->var_hash, v);
+	if (!id && v->mode == ir_var_temporary)
 	{
-		long tempID = (long)hash_table_find (globals->temp_var_hash, v);
-		if (tempID == 0)
-		{
-			tempID = ++globals->temp_var_counter;
-			hash_table_insert (globals->temp_var_hash, (void*)tempID, v);
-		}
-		ralloc_asprintf_append (&buffer, "tmpvar_%d", tempID);
+        id = ++globals->var_counter;
+        hash_table_insert (globals->var_hash, (void*)id, v);
 	}
+    if (id)
+    {
+        if (v->mode == ir_var_temporary)
+            ralloc_asprintf_append (&buffer, "tmpvar_%d", id);
+        else
+            ralloc_asprintf_append (&buffer, "%s_%d", v->name, id);
+    }
 	else
 	{
 		ralloc_asprintf_append (&buffer, "%s", v->name);
@@ -259,6 +262,17 @@ void ir_print_glsl_visitor::visit(ir_variable *ir)
    };
    const char *const interp[] = { "", "flat ", "noperspective " };
 
+   // give an id to any variable defined in a function that is not an uniform
+   if ((this->mode == kPrintGlslNone && ir->mode != ir_var_uniform))
+   {
+     long id = (long)hash_table_find (globals->var_hash, ir);
+     if (id == 0)
+     {
+       id = ++globals->var_counter;
+       hash_table_insert (globals->var_hash, (void*)id, ir);
+     }
+   }
+
    ralloc_asprintf_append (&buffer, "%s%s%s%s",
 	  cent, inv, mode[this->mode][ir->mode], interp[ir->interpolation]);
    print_precision (ir);
@@ -268,10 +282,78 @@ void ir_print_glsl_visitor::visit(ir_variable *ir)
    buffer = print_type_post(buffer, ir->type, false);
 }
 
+template<bool is_initialization>
+void print_assignement(ir_assignment *ir, ir_print_glsl_visitor* visitor)
+{
+	// assignement in global scope are postponed to main function
+	if (visitor->mode != kPrintGlslNone)
+	{
+		assert (!visitor->globals->main_function_done);
+        assert (!is_initialization);
+		visitor->globals->global_assignements.push_tail (new(visitor->globals->mem_ctx) ga_entry(ir));
+		ralloc_asprintf_append(&visitor->buffer, "//"); // for the ; that will follow (ugly, I know)
+		return;
+	}
+
+   if (ir->condition)
+   {
+      assert(!is_initialization);
+      ir->condition->accept(visitor);
+	  ralloc_asprintf_append (&visitor->buffer, " ");
+   }
+
+   if (is_initialization)
+       ir->whole_variable_written()->accept(visitor);
+   else
+       ir->lhs->accept(visitor);
+
+   char mask[5];
+   unsigned j = 0;
+   const glsl_type* lhsType = ir->lhs->type;
+   const glsl_type* rhsType = ir->rhs->type;
+   if (ir->lhs->type->vector_elements > 1 && ir->write_mask != (1<<ir->lhs->type->vector_elements)-1)
+   {
+	   for (unsigned i = 0; i < 4; i++) {
+		   if ((ir->write_mask & (1 << i)) != 0) {
+			   mask[j] = "xyzw"[i];
+			   j++;
+		   }
+	   }
+	   lhsType = glsl_type::get_instance(lhsType->base_type, j, 1);
+   }
+   mask[j] = '\0';
+   bool hasWriteMask = false;
+   if (mask[0])
+   {
+       assert(!is_initialization);
+	   ralloc_asprintf_append (&visitor->buffer, ".%s", mask);
+	   hasWriteMask = true;
+   }
+
+   ralloc_asprintf_append (&visitor->buffer, " = ");
+
+   bool typeMismatch = (lhsType != rhsType);
+   const bool addSwizzle = hasWriteMask && typeMismatch;
+   if (typeMismatch)
+   {
+	   if (!addSwizzle)
+		visitor->buffer = print_type(visitor->buffer, lhsType, true);
+	   ralloc_asprintf_append (&visitor->buffer, "(");
+   }
+
+   ir->rhs->accept(visitor);
+
+   if (typeMismatch)
+   {
+	   ralloc_asprintf_append (&visitor->buffer, ")");
+	   if (addSwizzle)
+		   ralloc_asprintf_append (&visitor->buffer, ".%s", mask);
+   }
+
+}
 
 void ir_print_glsl_visitor::visit(ir_function_signature *ir)
 {
-   this->globals->temp_var_counter = 0;
    print_precision (ir);
    buffer = print_type(buffer, ir->return_type, true);
    ralloc_asprintf_append (&buffer, " %s (", ir->function_name());
@@ -326,7 +408,17 @@ void ir_print_glsl_visitor::visit(ir_function_signature *ir)
       ir_instruction *const inst = (ir_instruction *) iter.get();
 
       indent();
-      inst->accept(this);
+
+      ir_instruction *const next = (ir_instruction*)(inst->next);
+      if (inst->ir_type == ir_type_variable and next and next->ir_type == ir_type_assignment and
+          next->as_assignment()->condition == NULL and
+          inst->as_variable() == next->as_assignment()->whole_variable_written())
+      {
+          print_assignement<true>(next->as_assignment(), this);
+          iter.next();
+      }
+      else
+          inst->accept(this);
 	  ralloc_asprintf_append (&buffer, ";\n");
    }
    indentation--;
@@ -592,65 +684,7 @@ void ir_print_glsl_visitor::visit(ir_dereference_record *ir)
 
 void ir_print_glsl_visitor::visit(ir_assignment *ir)
 {
-	// assignement in global scope are postponed to main function
-	if (this->mode != kPrintGlslNone)
-	{
-		assert (!this->globals->main_function_done);
-		this->globals->global_assignements.push_tail (new(this->globals->mem_ctx) ga_entry(ir));
-		ralloc_asprintf_append(&buffer, "//"); // for the ; that will follow (ugly, I know)
-		return;
-	}
-	
-   if (ir->condition)
-   {
-      ir->condition->accept(this);
-	  ralloc_asprintf_append (&buffer, " ");
-   }
-
-   ir->lhs->accept(this);
-
-   char mask[5];
-   unsigned j = 0;
-   const glsl_type* lhsType = ir->lhs->type;
-   const glsl_type* rhsType = ir->rhs->type;
-   if (ir->lhs->type->vector_elements > 1 && ir->write_mask != (1<<ir->lhs->type->vector_elements)-1)
-   {
-	   for (unsigned i = 0; i < 4; i++) {
-		   if ((ir->write_mask & (1 << i)) != 0) {
-			   mask[j] = "xyzw"[i];
-			   j++;
-		   }
-	   }
-	   lhsType = glsl_type::get_instance(lhsType->base_type, j, 1);
-   }
-   mask[j] = '\0';
-   bool hasWriteMask = false;
-   if (mask[0])
-   {
-	   ralloc_asprintf_append (&buffer, ".%s", mask);
-	   hasWriteMask = true;
-   }
-
-   ralloc_asprintf_append (&buffer, " = ");
-
-   bool typeMismatch = (lhsType != rhsType);
-   const bool addSwizzle = hasWriteMask && typeMismatch;
-   if (typeMismatch)
-   {
-	   if (!addSwizzle)
-		buffer = print_type(buffer, lhsType, true);
-	   ralloc_asprintf_append (&buffer, "(");
-   }
-
-   ir->rhs->accept(this);
-
-   if (typeMismatch)
-   {
-	   ralloc_asprintf_append (&buffer, ")");
-	   if (addSwizzle)
-		   ralloc_asprintf_append (&buffer, ".%s", mask);
-   }
-
+    print_assignement<false>(ir, this);
 }
 
 static char* print_float (char* buffer, float f)
@@ -689,7 +723,11 @@ void ir_print_glsl_visitor::visit(ir_constant *ir)
 
    if (ir->type->is_array()) {
       for (unsigned i = 0; i < ir->type->length; i++)
+      {
+	 if (i != 0)
+	    ralloc_asprintf_append (&buffer, ", ");
 	 ir->get_array_element(i)->accept(this);
+      }
    } else {
       bool first = true;
       for (unsigned i = 0; i < ir->type->components(); i++) {
