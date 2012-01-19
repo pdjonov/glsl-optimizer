@@ -410,8 +410,8 @@ void ir_print_glsl_visitor::visit(ir_function_signature *ir)
       indent();
 
       ir_instruction *const next = (ir_instruction*)(inst->next);
-      if (inst->ir_type == ir_type_variable and next and next->ir_type == ir_type_assignment and
-          next->as_assignment()->condition == NULL and
+      if (inst->ir_type == ir_type_variable && next && next->ir_type == ir_type_assignment &&
+          next->as_assignment()->condition == NULL &&
           inst->as_variable() == next->as_assignment()->whole_variable_written())
       {
           print_assignement<true>(next->as_assignment(), this);
