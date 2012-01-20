@@ -437,12 +437,6 @@ ralloc_vasprintf_append(char **str, const char *fmt, va_list args)
    size_t existing_length, new_length;
    char *ptr;
 
-   static char* cached_ptr = NULL;
-   static size_t cached_length = 0;
-   static size_t cached_allocated_size = 0;
-
-   size_t allocated_size = 0;
-
    assert(str != NULL);
 
    if (unlikely(*str == NULL)) {
@@ -451,30 +445,14 @@ ralloc_vasprintf_append(char **str, const char *fmt, va_list args)
       return true;
    }
 
-   if (*str == cached_ptr)
-       existing_length = cached_length;
-   else
-       existing_length = strlen(*str);
-
+   existing_length = strlen(*str);
    new_length = printf_length(fmt, args);
 
-   if ((*str != cached_ptr) || (existing_length + new_length >= cached_allocated_size))
-   {
-       allocated_size = (existing_length + new_length + 1) * 2;
-       ptr = resize(*str, allocated_size);
+   ptr = resize(*str, existing_length + new_length + 1);
+   if (unlikely(ptr == NULL))
+      return false;
 
-       if (unlikely(ptr == NULL))
-           return false;
-
-       cached_ptr = ptr;
-       cached_allocated_size = allocated_size;
-       *str = ptr;
-   }
-   else
-       assert(cached_ptr == *str);
-
-   vsnprintf(*str + existing_length, new_length + 1, fmt, args);
-   cached_length = existing_length + new_length;
-
+   vsnprintf(ptr + existing_length, new_length + 1, fmt, args);
+   *str = ptr;
    return true;
 }

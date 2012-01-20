@@ -223,6 +223,7 @@ ir_vec_index_to_cond_assign_visitor::visit_leave(ir_assignment *ir)
 
       deref = new(ir) ir_dereference_variable(var);
       assign = new(ir) ir_assignment(swizzle, deref, condition_swizzle);
+
       list.push_tail(assign);
    }
 

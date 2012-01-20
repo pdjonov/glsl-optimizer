@@ -1140,9 +1140,6 @@ ir_dereference::is_lvalue() const
    if ((var == NULL) || var->read_only)
       return false;
 
-   if (this->type->is_array() && !var->array_lvalue)
-      return false;
-
    /* From page 17 (page 23 of the PDF) of the GLSL 1.20 spec:
     *
     *    "Samplers cannot be treated as l-values; hence cannot be used
@@ -1354,7 +1351,7 @@ ir_swizzle::variable_referenced() const
 ir_variable::ir_variable(const struct glsl_type *type, const char *name,
 			 ir_variable_mode mode, glsl_precision precision)
    : max_array_access(0), read_only(false), centroid(false), invariant(false),
-     mode(mode), interpolation(ir_var_smooth), precision(precision), array_lvalue(false)
+     mode(mode), interpolation(ir_var_smooth), precision(precision)
 {
    this->ir_type = ir_type_variable;
    this->type = type;

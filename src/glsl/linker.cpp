@@ -1274,6 +1274,7 @@ assign_attribute_or_color_locations(gl_shader_program *prog,
       (target_index == MESA_SHADER_VERTEX) ? ir_var_in : ir_var_out;
 
 
+
    invalidate_variable_locations(sh, direction, generic_base);
 
    if ((target_index == MESA_SHADER_VERTEX) && (prog->Attributes != NULL)) {
